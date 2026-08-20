@@ -132,19 +132,25 @@ bridge's topics and writes them to an InfluxDB 2.x bucket: measurement
 `matter/airquality` (the first two topic segments — set the bridge's
 `MQTT_TOPIC_PREFIX=matter/airquality`), tag `unit` = sensor node id, and one
 field per metric (`co2_ppm=774.0`, `air_quality="good"`, …). It runs as a
-systemd service, not a container. Install on the server:
+systemd **user unit** under an unprivileged account, from `~/mattermqtt2influx`.
+Install on the server, as that user:
 
 ```sh
-apt install python3-paho-mqtt          # the only dependency
-cp -r mattermqtt2influx /opt/airquality/
-cd /opt/airquality/mattermqtt2influx
+sudo apt install python3-paho-mqtt     # the only dependency
+cp -r mattermqtt2influx ~/
+cd ~/mattermqtt2influx
 cp mattermqtt2influx.env.example mattermqtt2influx.env
 chmod 600 mattermqtt2influx.env        # holds the Influx token
 $EDITOR mattermqtt2influx.env          # broker + Influx URL/org/bucket/token
-cp mattermqtt2influx.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now mattermqtt2influx
+mkdir -p ~/.config/systemd/user
+cp mattermqtt2influx.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now mattermqtt2influx
+sudo loginctl enable-linger "$USER"    # keep it running without a login session
 ```
+
+Check it with `systemctl --user status mattermqtt2influx` /
+`journalctl --user -u mattermqtt2influx`.
 
 Points are batched and flushed every 5 s; on Influx outages they are retained
 and retried (up to 10k points).
