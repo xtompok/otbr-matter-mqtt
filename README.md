@@ -125,6 +125,30 @@ docker exec otbr sh -c 'ot-ctl dataset init new && ot-ctl dataset commit active 
 
 Then re-run the `set_thread_dataset` step above and re-commission devices.
 
+## Saving the data to InfluxDB (mattermqtt2influx)
+
+`mattermqtt2influx/` contains a standalone consumer that subscribes to the
+bridge's topics and writes them to an InfluxDB 2.x bucket: measurement
+`matter/airquality` (the first two topic segments — set the bridge's
+`MQTT_TOPIC_PREFIX=matter/airquality`), tag `unit` = sensor node id, and one
+field per metric (`co2_ppm=774.0`, `air_quality="good"`, …). It runs as a
+systemd service, not a container. Install on the server:
+
+```sh
+apt install python3-paho-mqtt          # the only dependency
+cp -r mattermqtt2influx /opt/airquality/
+cd /opt/airquality/mattermqtt2influx
+cp mattermqtt2influx.env.example mattermqtt2influx.env
+chmod 600 mattermqtt2influx.env        # holds the Influx token
+$EDITOR mattermqtt2influx.env          # broker + Influx URL/org/bucket/token
+cp mattermqtt2influx.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now mattermqtt2influx
+```
+
+Points are batched and flushed every 5 s; on Influx outages they are retained
+and retried (up to 10k points).
+
 ## Debugging inside the namespace
 
 Nothing is reachable from the host, but `docker exec` still works:

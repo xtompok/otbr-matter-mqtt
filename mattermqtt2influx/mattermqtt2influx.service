@@ -1,0 +1,19 @@
+[Unit]
+Description=Matter air quality MQTT data to InfluxDB
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/airquality/mattermqtt2influx
+EnvironmentFile=/opt/airquality/mattermqtt2influx/mattermqtt2influx.env
+ExecStart=/usr/bin/python3 /opt/airquality/mattermqtt2influx/mattermqtt2influx.py
+Restart=always
+RestartSec=5
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
