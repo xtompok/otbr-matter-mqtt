@@ -58,6 +58,10 @@ services:
     container_name: matter-mqtt-bridge
     restart: unless-stopped
     network_mode: service:netns
+    extra_hosts:
+      # Lets MQTT_HOST=host.docker.internal reach a broker running on the
+      # docker host (its port must be listening on 0.0.0.0, not 127.0.0.1).
+      - "host.docker.internal:host-gateway"
     environment:
       - MATTER_WS_URL=ws://127.0.0.1:5580/ws
       - MQTT_HOST=${MQTT_HOST:?address of your MQTT broker}

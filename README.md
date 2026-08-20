@@ -58,7 +58,7 @@ Retained, updated whenever the sensor reports (typically every few seconds):
 
      | name | value |
      |------|-------|
-     | `MQTT_HOST` | your broker's address (**required**; not `127.0.0.1` — the bridge is namespaced. Use `mosquitto` for the bundled broker) |
+     | `MQTT_HOST` | your broker's address (**required**; not `127.0.0.1` — the bridge is namespaced). `host.docker.internal` = broker on the docker host (must listen on 0.0.0.0); `mosquitto` = the bundled broker |
      | `DATA_DIR` | `/opt/airquality/data` (absolute path from step 1) |
      | `MQTT_PORT` / `MQTT_USERNAME` / `MQTT_PASSWORD` / `MQTT_TOPIC_PREFIX` | as needed |
      | `COMPOSE_PROFILES` | `broker` — only to run the bundled mosquitto |
