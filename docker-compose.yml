@@ -1,10 +1,24 @@
 services:
-  # OpenThread Border Router — turns the host + ESP32-C6 RCP into a Thread router.
+  # Holds the shared network namespace for otbr + matter-server + bridge
+  # (kubernetes "pause" container pattern). Keeping the namespace in this
+  # never-changing container means the others can restart freely without
+  # tearing the Thread interface out from under each other.
+  netns:
+    image: alpine:3
+    container_name: airquality-netns
+    command: sleep infinity
+    restart: unless-stopped
+    networks:
+      - thread
+
+  # OpenThread Border Router — turns the ESP32-C6 RCP into a Thread router.
+  # wpan0 and all Thread routing live inside the shared namespace; nothing is
+  # reachable from the host or LAN.
   otbr:
     image: openthread/border-router:latest
     container_name: otbr
     restart: unless-stopped
-    network_mode: host
+    network_mode: service:netns
     privileged: true
     devices:
       - source: ${OTBR_SERIAL_DEVICE:-/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_58:E6:C5:14:0E:00-if00}
@@ -15,17 +29,19 @@ services:
         permissions: rwm
     environment:
       - OT_RCP_DEVICE=spinel+hdlc+uart:///dev/ttyACM0?uart-baudrate=460800
-      - OT_INFRA_IF=${OTBR_INFRA_IF:?set to the host LAN interface, e.g. eth0}
-      # web UI on 127.0.0.1:8080, REST API on 127.0.0.1:8081 (defaults)
+      - OT_INFRA_IF=eth0   # the stack-internal network, always eth0 here
     volumes:
       - ${DATA_DIR:-./data}/otbr:/data
+    depends_on:
+      - netns
 
   # Matter controller — owns the Matter fabric, talks to devices over Thread.
+  # Shares the namespace with otbr so it sees wpan0 and OTBR's mDNS directly.
   matter-server:
     image: ghcr.io/home-assistant-libs/python-matter-server:stable
     container_name: matter-server
     restart: unless-stopped
-    network_mode: host        # needs mDNS + IPv6 routes to wpan0
+    network_mode: service:netns
     security_opt:
       - apparmor=unconfined   # required for BlueZ/D-Bus access (BLE commissioning)
     command: --storage-path /data --bluetooth-adapter 0
@@ -35,15 +51,16 @@ services:
     depends_on:
       - otbr
 
-  # Bridge: matter-server websocket -> MQTT topics.
+  # Bridge: matter-server websocket -> MQTT topics on your broker.
+  # The outbound MQTT connection is the stack's only external traffic.
   mqtt-bridge:
     build: ./bridge
     container_name: matter-mqtt-bridge
     restart: unless-stopped
-    network_mode: host
+    network_mode: service:netns
     environment:
       - MATTER_WS_URL=ws://127.0.0.1:5580/ws
-      - MQTT_HOST=${MQTT_HOST:-127.0.0.1}
+      - MQTT_HOST=${MQTT_HOST:?address of your MQTT broker}
       - MQTT_PORT=${MQTT_PORT:-1883}
       - MQTT_USERNAME=${MQTT_USERNAME:-}
       - MQTT_PASSWORD=${MQTT_PASSWORD:-}
@@ -51,16 +68,28 @@ services:
     depends_on:
       - matter-server
 
-  # Optional local broker — enable with: docker compose --profile broker up -d
-  # Skip it if the server already runs one (then set MQTT_HOST in .env).
+  # Optional local broker — enable with COMPOSE_PROFILES=broker (then
+  # MQTT_HOST=mosquitto). Its port 1883 is the only one published to the host.
   mosquitto:
     image: eclipse-mosquitto:2
     container_name: mosquitto
     restart: unless-stopped
     profiles:
       - broker
+    networks:
+      - thread
     ports:
       - "1883:1883"
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ${DATA_DIR:-./data}/mosquitto:/mosquitto/data
+
+networks:
+  # Internal network with IPv6: OTBR uses it as its "infrastructure link" and
+  # publishes its prefix route into the Thread network. Egress (MQTT broker,
+  # matter-server certificate fetch) goes through normal docker NAT.
+  thread:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: fd42:6f74:6272::/64

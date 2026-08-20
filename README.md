@@ -6,14 +6,25 @@ its measurements to MQTT, using an **ESP32-C6** as the Thread radio.
 ```
 IKEA Alpstuga ──Thread(802.15.4)──> ESP32-C6 (OpenThread RCP firmware, USB)
                                         │
-                                   otbr container (OpenThread Border Router)
-                                        │ wpan0 (IPv6)
-                                   matter-server container (Matter controller)
-                                        │ websocket :5580
-                                   mqtt-bridge container
-                                        │
-                                   MQTT broker (mosquitto or your own)
+              ┌─ isolated network namespace ("netns" container) ─┐
+              │  otbr (OpenThread Border Router)                 │
+              │     │ wpan0 (IPv6)                               │
+              │  matter-server (Matter controller, ws :5580)     │
+              │     │                                            │
+              │  mqtt-bridge                                     │
+              └─────┼────────────────────────────────────────────┘
+                    └──> MQTT broker (the stack's only output)
 ```
+
+The whole Matter/Thread side runs inside a private network namespace shared by
+the three containers (`network_mode: service:netns`). **No ports are published
+on the host** and nothing on the LAN can see the Thread network or the Matter
+fabric; the only external traffic is the bridge's outbound connection to your
+MQTT broker (plus image pulls / a one-time certificate fetch by matter-server).
+The optional bundled mosquitto is the single exception — it publishes `1883`.
+
+Consequence: phone apps / Home Assistant cannot join this fabric, and
+commissioning is done via CLI (see below). That is intentional.
 
 ## MQTT topics
 
@@ -28,7 +39,7 @@ Retained, updated whenever the sensor reports (typically every few seconds):
 | `airquality/4/air_quality`     | good    | good/fair/moderate/poor/very_poor/extremely_poor |
 | `airquality/bridge/status`     | online  | LWT |
 
-`4` is the Matter node id; prefix configurable via `MQTT_TOPIC_PREFIX` in `.env`.
+`4` is the Matter node id; prefix configurable via `MQTT_TOPIC_PREFIX`.
 
 ## Deploying with Portainer
 
@@ -36,7 +47,7 @@ Retained, updated whenever the sensor reports (typically every few seconds):
    machine where the sensor was commissioned to an absolute path on the server,
    e.g. `/opt/airquality/data` (it must contain `otbr/` and `matter/`; without
    it a new Thread network is formed and the sensor must be re-paired). Stop
-   the stack on the old machine.
+   the stack on the old machine — the sensor can only follow one border router.
 2. Plug the ESP32-C6 into the server and enable IPv6 forwarding:
    `sysctl net.ipv6.conf.all.forwarding=1` (persist in /etc/sysctl.d/).
 3. Portainer → **Stacks → Add stack → Repository**:
@@ -47,46 +58,26 @@ Retained, updated whenever the sensor reports (typically every few seconds):
 
      | name | value |
      |------|-------|
-     | `OTBR_INFRA_IF` | server LAN interface, e.g. `eth0` (**required**) |
+     | `MQTT_HOST` | your broker's address (**required**; not `127.0.0.1` — the bridge is namespaced. Use `mosquitto` for the bundled broker) |
      | `DATA_DIR` | `/opt/airquality/data` (absolute path from step 1) |
-     | `MQTT_HOST` | your broker, or leave unset with the bundled one |
+     | `MQTT_PORT` / `MQTT_USERNAME` / `MQTT_PASSWORD` / `MQTT_TOPIC_PREFIX` | as needed |
      | `COMPOSE_PROFILES` | `broker` — only to run the bundled mosquitto |
 
 4. Deploy. The bridge image is built from `bridge/` during deployment.
 
-Notes: all services use host networking, so nothing needs port mapping;
-matter-server listens on `:5580` on all interfaces — firewall it if the server
-is exposed. BlueZ on the host is only needed to commission additional devices.
+BlueZ on the host is only needed to commission additional devices.
 
 ## Deploying manually (docker compose CLI)
 
-1. Copy this whole directory to the server **including `data/`** — it holds the
-   Thread network credentials (`data/otbr`) and the Matter fabric with the
-   already-commissioned sensor (`data/matter`). With it, no re-pairing is needed.
-2. Plug the ESP32-C6 into the server (the single USB-C / native USB port).
-   The `/dev/serial/by-id/...` path in `.env` is tied to the chip's MAC, so it
-   is the same on every machine.
-3. Copy `.env.example` to `.env` and edit it: set `OTBR_INFRA_IF` to the server's LAN interface
-   (`ip route show default`), and `MQTT_HOST` if you already run a broker.
-4. Host prerequisites: `sysctl net.ipv6.conf.all.forwarding=1` (persist in
-   /etc/sysctl.d/), and BlueZ running only if you want to commission new
-   devices there.
-5. Start:
+Copy `.env.example` to `.env`, set at least `MQTT_HOST`, then:
 
-   ```sh
-   docker compose --profile broker up -d --build    # with bundled mosquitto
-   docker compose up -d --build                     # broker elsewhere
-   ```
+```sh
+docker compose up -d --build
+```
 
-Stop the stack on the old machine first — two border routers with the same
-dataset on different LANs is not a supported setup, and the sensor can only
-follow one.
-
-## Ports used (host network)
-
-- `5580` matter-server websocket (all interfaces — firewall it if the server is exposed)
-- `8080`/`8081` OTBR web UI / REST (127.0.0.1 only)
-- `1883` mosquitto (only with `--profile broker`)
+Migration between machines = move this directory including `data/`, plug the
+ESP into the new machine (the `/dev/serial/by-id/...` path is tied to the
+chip's MAC, so it is identical everywhere), same host prerequisites as above.
 
 ## Flashing a (new) ESP32-C6
 
@@ -133,3 +124,13 @@ docker exec otbr sh -c 'ot-ctl dataset init new && ot-ctl dataset commit active 
 ```
 
 Then re-run the `set_thread_dataset` step above and re-commission devices.
+
+## Debugging inside the namespace
+
+Nothing is reachable from the host, but `docker exec` still works:
+
+```sh
+docker exec otbr ot-ctl state                # Thread role (router/leader/child)
+docker exec otbr wget -qO- localhost:8081/node # OTBR REST API
+docker logs matter-mqtt-bridge               # published values
+```
