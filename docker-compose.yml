@@ -1,0 +1,66 @@
+services:
+  # OpenThread Border Router — turns the host + ESP32-C6 RCP into a Thread router.
+  otbr:
+    image: openthread/border-router:latest
+    container_name: otbr
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+    devices:
+      - source: ${OTBR_SERIAL_DEVICE:-/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_58:E6:C5:14:0E:00-if00}
+        target: /dev/ttyACM0
+        permissions: rwm
+      - source: /dev/net/tun
+        target: /dev/net/tun
+        permissions: rwm
+    environment:
+      - OT_RCP_DEVICE=spinel+hdlc+uart:///dev/ttyACM0?uart-baudrate=460800
+      - OT_INFRA_IF=${OTBR_INFRA_IF:?set to the host LAN interface, e.g. eth0}
+      # web UI on 127.0.0.1:8080, REST API on 127.0.0.1:8081 (defaults)
+    volumes:
+      - ${DATA_DIR:-./data}/otbr:/data
+
+  # Matter controller — owns the Matter fabric, talks to devices over Thread.
+  matter-server:
+    image: ghcr.io/home-assistant-libs/python-matter-server:stable
+    container_name: matter-server
+    restart: unless-stopped
+    network_mode: host        # needs mDNS + IPv6 routes to wpan0
+    security_opt:
+      - apparmor=unconfined   # required for BlueZ/D-Bus access (BLE commissioning)
+    command: --storage-path /data --bluetooth-adapter 0
+    volumes:
+      - ${DATA_DIR:-./data}/matter:/data
+      - /run/dbus:/run/dbus:ro
+    depends_on:
+      - otbr
+
+  # Bridge: matter-server websocket -> MQTT topics.
+  mqtt-bridge:
+    build: ./bridge
+    container_name: matter-mqtt-bridge
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - MATTER_WS_URL=ws://127.0.0.1:5580/ws
+      - MQTT_HOST=${MQTT_HOST:-127.0.0.1}
+      - MQTT_PORT=${MQTT_PORT:-1883}
+      - MQTT_USERNAME=${MQTT_USERNAME:-}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-}
+      - MQTT_TOPIC_PREFIX=${MQTT_TOPIC_PREFIX:-airquality}
+    depends_on:
+      - matter-server
+
+  # Optional local broker — enable with: docker compose --profile broker up -d
+  # Skip it if the server already runs one (then set MQTT_HOST in .env).
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    restart: unless-stopped
+    profiles:
+      - broker
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ${DATA_DIR:-./data}/mosquitto:/mosquitto/data
